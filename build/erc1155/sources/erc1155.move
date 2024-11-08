@@ -394,7 +394,12 @@ module erc1155::erc1155 {
 
     /*
     * Merges two NFTs with the same token_id
-    * Requirements:
+    * Not Requirements:
+    *
+    * Allows merging multiple NFTs of the same type into one
+    * Reduces the number of objects to manage
+    * Convenient for transferring large quantities
+    *
     * @Param nft1 The NFT to merge into
     * @Param nft2 The NFT to merge from
     * - Both NFTs must have the same token_id
