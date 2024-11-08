@@ -108,6 +108,10 @@ module erc1155::erc1155 {
     /*
     * Initializes a new collection
     * Creates a shared collection object with sender as mint authority
+    * @param ctx Transaction context
+    * Note: This function is only called once during contract deployment
+    * Note: The mint authority is set to the sender of the transaction
+    * Note: The collection object is shared to allow access from other modules
     */
     fun init(ctx: &mut TxContext) {
         let collection = Collection {
@@ -125,8 +129,9 @@ module erc1155::erc1155 {
     /*
     * Adds a new operator address
     * Requirements:
-    * - Caller must be the mint authority
-    * - Operator address must not already be registered
+    * @Param collection The NFT collection
+    * @Param operator The address to add as an operator
+    * @Param ctx Transaction context
     */
     public entry fun add_operator(
         collection: &mut Collection,
@@ -145,8 +150,9 @@ module erc1155::erc1155 {
     /*
     * Removes an operator address
     * Requirements:
-    * - Caller must be the mint authority
-    * - Operator address must exist
+    * @Param collection The NFT collection
+    * @Param operator The address to remove
+    * @Param ctx Transaction context
     */
     public entry fun remove_operator(
         collection: &mut Collection,
@@ -166,7 +172,9 @@ module erc1155::erc1155 {
     /*
     * Transfers mint authority to a new address
     * Requirements:
-    * - Caller must be the current mint authority
+    * @Param collection The NFT collection
+    * @Param new_authority The address to transfer mint authority to
+    * @Param ctx Transaction context
     */
     public entry fun transfer_authority(
         collection: &mut Collection,
@@ -183,8 +191,14 @@ module erc1155::erc1155 {
     /*
     * Mints new tokens
     * Requirements:
-    * - Caller must be the mint authority
-    * - Amount must be greater than 0
+    * @Param collection The NFT collection
+    * @Param name The name of the token
+    * @Param description The description of the token
+    * @Param uri The URI for the token metadata
+    * @Param amount The number of tokens to mint
+    * @Param recipient The address to mint tokens for
+    * @Param ctx Transaction context
+    * Effects:
     * Emits a TokenMinted event
     */
     public entry fun mint(
@@ -259,9 +273,11 @@ module erc1155::erc1155 {
     /*
     * Deposits revenue for a token type
     * Requirements:
-    * - Caller must be a registered operator
-    * - Token must exist
-    * - Payment amount must be sufficient
+    * @Param caller must be a registered operator
+    * @Param token must exist
+    * @Param payment amount must be sufficient
+    * @Param ctx Transaction context
+    * Effects:
     * Emits a RevenueDeposited event
     */
     public entry fun deposit_revenue(
@@ -305,8 +321,9 @@ module erc1155::erc1155 {
     /*
     * Withdraws revenue share for token holder
     * Requirements:
-    * - Token must exist
-    * - Caller must have sufficient token balance
+    * @Param collection The NFT collection
+    * @Param nft The NFT to withdraw revenue from
+    * @Param ctx Transaction context
     * Emits a RevenueWithdrawn event
     */
     public entry fun withdraw_revenue(
@@ -349,7 +366,10 @@ module erc1155::erc1155 {
     /*
     * Transfers tokens to another address
     * Requirements:
-    * - Caller must have sufficient balance
+    * @Param nft The NFT to transfer
+    * @Param amount The amount of tokens to transfer
+    * @Param recipient The address to transfer tokens to
+    * @Param ctx Transaction context
     */
     public entry fun transfer(
         nft: &mut NFT,
@@ -375,6 +395,8 @@ module erc1155::erc1155 {
     /*
     * Merges two NFTs with the same token_id
     * Requirements:
+    * @Param nft1 The NFT to merge into
+    * @Param nft2 The NFT to merge from
     * - Both NFTs must have the same token_id
     */
     public entry fun merge(nft1: &mut NFT, nft2: NFT) {
@@ -390,6 +412,10 @@ module erc1155::erc1155 {
     /*
     * Updates holder balance tracking
     * Internal helper function to maintain accurate balance records
+    * @param collection The NFT collection
+    * @param holder The address of the token holder
+    * @param token_id The token ID to update balance for
+    * @param amount The amount to update balance by
     */
     fun update_holder_balance(
         collection: &mut Collection,

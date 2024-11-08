@@ -1,355 +1,426 @@
 # ERC-1155 Implementation Documentation
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Technical Architecture](#technical-architecture)
+- [Core Components](#core-components)
+- [Implementation Details](#implementation-details)
+- [Function Analysis](#function-analysis)
+- [Testing Framework](#testing-framework)
+- [Error Handling](#error-handling)
+- [Events System](#events-system)
+- [Security Considerations](#security-considerations)
+- [Usage Guide](#usage-guide)
+
 ## Overview
 
-This implementation provides an ERC-1155-style NFT system on the Sui blockchain with revenue sharing capabilities. The system allows for semi-fungible tokens where users can own multiple units of the same token type, combining the benefits of fungible tokens (like ERC-20) and non-fungible tokens (like ERC-721).
+### Description
 
-## Features
+A comprehensive ERC-1155 implementation on Sui blockchain that combines:
 
-- 🔐 Role-based access control
-- 💰 Revenue sharing system
-- 🔄 Token merging capabilities
-- 📊 Balance tracking per holder
-- 🏷️ Metadata management
-- 📡 Event emission system
-- ⚡ Efficient batch operations
+- Semi-fungible token capabilities
+- Built-in revenue sharing system
+- Role-based access control
+- Automated balance tracking
+
+### Key Features
+
+- Multi-token support in single contract
+- Revenue distribution system
+- Comprehensive event logging
+- Token merging functionality
+- Metadata management
+- Balance tracking at multiple levels
+
+## Technical Architecture
+
+### Core Dependencies
+
+```rust
+use sui::object::{Self, ID, UID};
+use sui::tx_context::{Self, TxContext};
+use std::string::{Self, String};
+use sui::coin::{Self, Coin};
+use sui::transfer;
+use sui::event;
+use sui::balance::{Self, Balance};
+use sui::sui::SUI;
+use sui::bag::{Self, Bag};
+use sui::vec_map::{Self, VecMap};
+use std::vector;
+```
+
+### Error Codes
+
+```rust
+const ENO_MINT_AUTHORITY: u64 = 1; // Only mint authority can perform this action
+const ENO_OPERATOR: u64 = 2;       // Only operators can perform this action
+const ETOKEN_NOT_EXIST: u64 = 3;   // Token ID does not exist
+const ENO_BALANCE: u64 = 4;        // Insufficient balance for operation
+const EINVALID_AMOUNT: u64 = 5;    // Invalid amount specified
+```
 
 ## Core Components
 
-### 1. Main Structures
+### 1. Data Structures
 
-#### NFT
-
-- Represents individual token ownership
-- Fields:
-- `id: UID`: Unique identifier for the NFT instance
-- `token_id: ID`: ID of the token type
-- `balance: u64`: Amount of tokens owned
-- Capabilities:
-- `key`: Can be stored as a top-level object
-- `store`: Can be stored inside other objects
-
-#### Collection
-
-- Central management structure for the entire system
-- Fields:
-- Access Control:
-- `id: UID`: Unique identifier for collection
-- `mint_authority: address`: Address authorized to mint tokens
-- `operators: vector<address>`: List of authorized operators
-- Token Management:
-- `token_supplies: VecMap<ID, u64>`: Total supply per token type
-- `token_metadata: Bag`: Storage for token metadata
-- Revenue System:
-- `revenues: VecMap<ID, Balance<SUI>>`: Revenue per token type
-- `holder_balances: VecMap<address, VecMap<ID, u64>>`: Balance tracking
-- Capability:
-- `key`: Can be stored as a top-level object
-
-#### TokenMetadata
-
-- Stores token type information
-- Fields:
-- `name: String`: Token type name
-- `description: String`: Token type description
-- `uri: String`: URI for additional metadata
-- Capability:
-- `store`: Can be stored inside other objects
-
-### 2. Events System
-
-#### TokenMinted
+#### NFT Structure
 
 ```rust
-struct TokenMinted has copy, drop {
-token_id: ID,
-creator: address,
-recipient: address,
-amount: u64
+struct NFT has key, store {
+    id: UID,
+    token_id: ID,
+    balance: u64
 }
 ```
 
-- Emitted when new tokens are created
-- Tracks creation details and initial distribution
+**Detailed Analysis:**
 
-#### RevenueDeposited
+- `id`: Unique identifier from Sui
+  - Generated using `object::new(ctx)`
+  - Used for object management
+  - Immutable after creation
+- `token_id`: Links to token type
+  - References metadata and supply info
+  - Used for revenue calculations
+  - Immutable after minting
+- `balance`: Token quantity
+  - Mutable through transfers/merges
+  - Used in revenue share calculation
+  - Must be positive
+
+#### Collection Structure
 
 ```rust
-struct RevenueDeposited has copy, drop {
-token_id: ID,
-operator: address,
-amount: u64
+struct Collection has key {
+    id: UID,
+    mint_authority: address,
+    operators: vector<address>,
+    token_supplies: VecMap<ID, u64>,
+    token_metadata: Bag,
+    revenues: VecMap<ID, Balance<SUI>>,
+    holder_balances: VecMap<address, VecMap<ID, u64>>
 }
 ```
 
-- Emitted when revenue is added to token type
-- Monitors revenue inflow and source
+**Component Analysis:**
 
-#### RevenueWithdrawn
+1. **Access Control**
+
+   - `mint_authority`: Primary administrator
+   - `operators`: Revenue managers
+   - Purpose: Multi-level permission system
+
+2. **Token Management**
+
+   - `token_supplies`: Supply tracking
+   - `token_metadata`: Metadata storage
+   - Purpose: Token information management
+
+3. **Revenue System**
+   - `revenues`: Per-token revenue storage
+   - `holder_balances`: User balance tracking
+   - Purpose: Revenue distribution management
+
+#### TokenMetadata Structure
 
 ```rust
-struct RevenueWithdrawn has copy, drop {
-token_id: ID,
-holder: address,
-amount: u64
+struct TokenMetadata has store {
+    name: String,
+    description: String,
+    uri: String
 }
 ```
 
-- Emitted when holders claim revenue
-- Records distribution of revenue
+## Implementation Details
 
-### 3. Error Constants
-
-```rust
-const ENO_MINT_AUTHORITY: u64 = 1 ; // Only mint authority can perform this action
-const ENO_OPERATOR: u64 = 2       ;     // Only operators can perform this action
-const ETOKEN_NOT_EXIST: u64 = 3   ; // Token ID does not exist
-const ENO_BALANCE: u64 = 4        ;      // Insufficient balance for operation
-const EINVALID_AMOUNT: u64 = 5    ;  // Invalid amount specified
-```
-
-### 4. Key Functions
-
-#### Token Management
-
-##### Initialize Collection
+### 1. Initialization Process
 
 ```rust
 fun init(ctx: &mut TxContext)
 ```
 
-- Creates new collection with sender as mint authority
-- Initializes empty data structures
-- Shares collection object for public access
+**Steps:**
 
-##### Mint Tokens
+1. Creates new Collection object
+2. Sets transaction sender as mint authority
+3. Initializes empty data structures
+4. Shares object for public access
 
-```rust
-public entry fun mint(
-collection: &mut Collection,
-name: vector<u8>,
-description: vector<u8>,
-uri: vector<u8>,
-amount: u64,
-recipient: address,
-ctx: &mut TxContext
-)
-```
+### 2. Access Control System
 
-- Creates new token type with metadata
-- Mints specified amount to recipient
-- Updates supplies and balances
-- Access: Mint authority only
+#### Roles & Permissions
 
-##### Transfer Tokens
+1. **Mint Authority**
 
-```rust
-public entry fun transfer(
-nft: &mut NFT,
-amount: u64,
-recipient: address,
-ctx: &mut TxContext
-)
-```
+   - Mint new tokens
+   - Add/remove operators
+   - Transfer authority role
+   - Full administrative control
 
-- Transfers specified amount to recipient
-- Creates new NFT object for recipient
-- Updates balances automatically
+2. **Operators**
 
-##### Merge Tokens
+   - Deposit revenue
+   - Cannot mint or manage roles
+   - Limited to revenue operations
 
-```rust
-public entry fun merge(nft1: &mut NFT, nft2: NFT)
-```
+3. **Token Holders**
+   - Transfer tokens
+   - Withdraw revenue shares
+   - Merge owned tokens
 
-- Combines balances of two NFTs
-- Requires same token_id
-- Deletes second NFT after merging
+### 3. Revenue Management
 
-#### Revenue System
-
-##### Deposit Revenue
-
-```rust
-public entry fun deposit_revenue(
-collection: &mut Collection,
-token_id: ID,
-payment: &mut Coin<SUI>,
-amount: u64,
-ctx: &mut TxContext
-)
-```
-
-- Accepts SUI payment for token type
-- Updates revenue balance
-- Access: Operators only
-
-##### Withdraw Revenue
+#### Revenue Distribution Process
 
 ```rust
 public entry fun withdraw_revenue(
-collection: &mut Collection,
-nft: &NFT,
-ctx: &mut TxContext
+    collection: &mut Collection,
+    nft: &NFT,
+    ctx: &mut TxContext
 )
 ```
 
-- Calculates holder's share based on balance
-- Transfers revenue in SUI
-- Proportional to token ownership
+**Algorithm:**
 
-#### Access Control Functions
+1. Verify token existence
+2. Calculate holder's share:
+   ```rust
+   share = (total_revenue * holder_balance) / total_supply
+   ```
+3. Split revenue balance
+4. Transfer to holder
+5. Emit withdrawal event
 
-##### Operator Management
+#### Revenue Deposit Process
 
 ```rust
-public entry fun add_operator(collection: &mut Collection, operator: address, ctx: &mut TxContext)
-public entry fun remove_operator(collection: &mut Collection, operator: address, ctx: &mut TxContext)
+public entry fun deposit_revenue(
+    collection: &mut Collection,
+    token_id: ID,
+    payment: &mut Coin<SUI>,
+    amount: u64,
+    ctx: &mut TxContext
+)
 ```
 
-- Manages operator access list
-- Access: Mint authority only
+**Steps:**
 
-##### Authority Transfer
+1. Verify operator status
+2. Check token existence
+3. Validate payment amount
+4. Transfer to revenue pool
+5. Emit deposit event
+
+## Testing Framework
+
+### Test Environment
 
 ```rust
-public entry fun transfer_authority(collection: &mut Collection, new_authority: address, ctx: &mut TxContext)
+const ADMIN: address = @0xAA;
+const OPERATOR: address = @0xBB;
+const USER1: address = @0xCC;
+const USER2: address = @0xDD;
 ```
 
-- Transfers mint authority role
-- Access: Current mint authority only
+### Test Categories
 
-#### Utility Functions
+#### 1. Initialization Tests
 
 ```rust
-public fun balance(nft: &NFT): u64
-public fun token_id(nft: &NFT): ID
-public fun token_exists(collection: &Collection, token_id: ID): bool
-public fun is_operator(collection: &Collection, addr: address): bool
-public fun total_supply(collection: &Collection, token_id: ID): u64
-public fun get_metadata(collection: &Collection, token_id: ID): &TokenMetadata
-public fun get_revenue_balance(collection: &Collection, token_id: ID): u64
+#[test]
+fun test_init_revenue()
 ```
 
-## Implementation Details
+**Verifies:**
 
-### Access Control System
+- Collection creation
+- Initial operator status
+- Basic structure setup
 
-1. **Roles**:
-
-- Mint Authority: Full control over minting and operators
-- Operators: Can deposit revenue
-- Token Holders: Can transfer and withdraw revenue
-
-2. **Role Management**:
-
-- Authority transferable via `transfer_authority`
-- Operators managed via add/remove functions
-- Role checks via assertions
-
-### Revenue Distribution
-
-1. **Deposit Process**:
-
-- Operators deposit SUI tokens
-- Amount tracked per token type
-- Events emitted for transparency
-
-2. **Withdrawal Process**:
-
-- Proportional to token ownership
-- Formula: `share = (total_revenue * holder_balance) / total_supply`
-- Automatic calculation and transfer
-
-### Balance Tracking
-
-1. **Multiple Levels**:
-
-- Individual NFT balances
-- Per-holder balances in collection
-- Total supplies per token type
-
-2. **Update Mechanisms**:
-
-- Automatic updates on mint
-- Transfer adjustments
-- Merge consolidation
-
-## Usage Examples
-
-### Basic Token Operations
+#### 2. Access Control Tests
 
 ```rust
-// Initialize collection (done once)
-init(ctx)                            ;
-
-// Mint new tokens
-mint(
-collection,
-b"Game Item",
-b"In-game collectible",
-b"https://metadata.uri",
-1000,
-recipient,
-ctx
-)                        ;
-
-// Transfer tokens
-transfer(nft, 500, new_recipient, ctx) ;
-
-// Merge tokens
-merge(nft1, nft2) ;
+#[test]
+#[expected_failure(abort_code = 1)]
+fun test_add_operator_unauthorized()
 ```
 
-### Revenue Management
+**Validates:**
+
+- Role permissions
+- Authorization checks
+- Error handling
+
+#### 3. Token Operation Tests
 
 ```rust
-// Deposit revenue
-deposit_revenue(collection, token_id, payment, 1000, ctx) ;
-
-// Withdraw revenue share
-withdraw_revenue(collection, nft, ctx) ;
+#[test]
+fun test_mint_erc1155()
 ```
 
-### Access Control
+**Checks:**
+
+- Token minting
+- Balance updates
+- Metadata storage
+- Event emission
+
+#### 4. Transfer Tests
 
 ```rust
-// Add operator
-add_operator(collection, operator_address, ctx) ;
-
-// Remove operator
-remove_operator(collection, operator_address, ctx) ;
-
-// Transfer authority
-transfer_authority(collection, new_authority, ctx) ;
+#[test]
+fun test_transfer_erc1155()
 ```
 
-## Testing
+**Verifies:**
 
-Test mode initialization available via:
+- Balance updates
+- NFT creation
+- Authorization
+- Error conditions
+
+#### 5. Revenue System Tests
 
 ```rust
-#[test_only]
-public fun init_for_testing(ctx: &mut TxContext)
+#[test]
+fun test_deposit_revenue()
+#[test]
+fun test_withdraw_revenue()
+```
+
+**Validates:**
+
+- Revenue deposits
+- Withdrawal calculations
+- Balance tracking
+- Event emission
+
+### Test Execution Flow
+
+#### Example: Revenue Test
+
+1. Initialize collection
+2. Add operator
+3. Mint tokens
+4. Deposit revenue
+5. Process withdrawal
+6. Verify balances
+
+## Events System
+
+### 1. TokenMinted
+
+```rust
+struct TokenMinted has copy, drop {
+    token_id: ID,
+    creator: address,
+    recipient: address,
+    amount: u64
+}
+```
+
+### 2. RevenueDeposited
+
+```rust
+struct RevenueDeposited has copy, drop {
+    token_id: ID,
+    operator: address,
+    amount: u64
+}
+```
+
+### 3. RevenueWithdrawn
+
+```rust
+struct RevenueWithdrawn has copy, drop {
+    token_id: ID,
+    holder: address,
+    amount: u64
+}
 ```
 
 ## Security Considerations
 
-1. Access control checks on all privileged operations
-2. Balance validation before transfers
-3. Revenue calculation protection against overflow
-4. Event emission for transparency
-5. Comprehensive error handling
+### 1. Access Control
 
-## Dependencies
+- Role-based permissions
+- Authority validation
+- Operation restrictions
 
-- `sui::object`
-- `sui::tx_context`
-- `std::string`
-- `sui::coin`
-- `sui::transfer`
-- `sui::event`
-- `sui::balance`
-- `sui::bag`
-- `sui::vec_map`
-- `std::vector`
+### 2. Input Validation
+
+- Balance checks
+- Amount validation
+- Token existence verification
+
+### 3. State Management
+
+- Atomic operations
+- Balance consistency
+- Event tracking
+
+### 4. Error Handling
+
+- Custom error codes
+- Comprehensive checks
+- Clear error messages
+
+## Usage Guide
+
+### 1. Contract Deployment
+
+```rust
+// Initialize collection
+init(ctx);
+```
+
+### 2. Token Management
+
+```rust
+// Mint tokens
+mint(collection, "Name", "Description", "URI", 1000, recipient, ctx);
+
+// Transfer tokens
+transfer(nft, 500, new_recipient, ctx);
+```
+
+### 3. Revenue Operations
+
+```rust
+// Deposit revenue
+deposit_revenue(collection, token_id, payment, amount, ctx);
+
+// Withdraw revenue
+withdraw_revenue(collection, nft, ctx);
+```
+
+### 4. Access Control
+
+```rust
+// Add operator
+add_operator(collection, operator_address, ctx);
+
+// Remove operator
+remove_operator(collection, operator_address, ctx);
+```
+
+## Future Improvements
+
+1. **Enhanced Features**
+
+   - Batch operations
+   - Metadata updates
+   - Advanced revenue models
+
+2. **Optimizations**
+
+   - Gas efficiency
+   - Storage optimization
+   - Batch processing
+
+3. **Additional Functionality**
+   - Token burning
+   - Approval system
+   - Secondary market support

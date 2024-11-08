@@ -5,14 +5,14 @@ compiled_package_info:
     erc1155: "0000000000000000000000000000000000000000000000000000000000000000"
     std: "0000000000000000000000000000000000000000000000000000000000000001"
     sui: "0000000000000000000000000000000000000000000000000000000000000002"
-  source_digest: 782AF736C447587CF7872C52674CEB2BB302596B263A4EFBE2F399FACA951F12
+  source_digest: 203D39D41E5288F2D92AC85E01731CB831CBD8D067DC4667994CD661C1516ACD
   build_flags:
-    dev_mode: true
-    test_mode: true
+    dev_mode: false
+    test_mode: false
     generate_docs: false
     install_dir: ~
     force_recompilation: false
-    lock_file: ~
+    lock_file: "./Move.lock"
     fetch_deps_only: false
     skip_fetch_latest_git_deps: false
     default_flavor: sui
