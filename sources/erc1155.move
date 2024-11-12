@@ -19,17 +19,20 @@ module erc1155::erc1155 {
     const ETOKEN_NOT_EXIST: u64 = 3; // Token ID does not exist
     const ENO_BALANCE: u64 = 4; // Insufficient balance for operation
     const EINVALID_AMOUNT: u64 = 5; // Invalid amount specified
+    const ENO_NEW_REVENUE: u64 = 6; // No new revenue to withdraw
 
     /*
     * Main NFT token struct representing ownership of tokens
     * - id: Unique identifier for this NFT instance
     * - token_id: ID of the token type this NFT represents
     * - balance: Amount of tokens owned in this NFT instance
+    * - last_withdrawn_revenue: Tracks total revenue at last withdrawal to prevent multiple withdrawals
     */
     struct NFT has key, store {
         id: UID,
         token_id: ID,
-        balance: u64
+        balance: u64,
+        last_withdrawn_revenue: u64
     }
 
     /*
@@ -241,11 +244,12 @@ module erc1155::erc1155 {
             balance::zero()
         );
 
-        // Create NFT for recipient
+        // Create NFT and setup last_withdrawn_revenuefor recipient with initial withdrawn revenue of 0
         let nft = NFT {
             id: object::new(ctx),
             token_id: object::uid_to_inner(&token_id),
-            balance: amount
+            balance: amount,
+            last_withdrawn_revenue: 0
         };
 
         // Update holder balance
@@ -324,11 +328,16 @@ module erc1155::erc1155 {
     * @Param collection The NFT collection
     * @Param nft The NFT to withdraw revenue from
     * @Param ctx Transaction context
-    * Emits a RevenueWithdrawn event
+    * Actions:
+    * - Verifies token exists
+    * - Calculates only new revenue since last withdrawal
+    * - Updates last_withdrawn_revenue to prevent multiple withdrawals
+    * Effects:
+    * - Emits a RevenueWithdrawn event
     */
     public entry fun withdraw_revenue(
         collection: &mut Collection,
-        nft: &NFT,
+        nft: &mut NFT,
         ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
@@ -340,14 +349,20 @@ module erc1155::erc1155 {
             ETOKEN_NOT_EXIST
         );
 
-        // Calculate share
-        let total_supply = *vec_map::get(
-            &collection.token_supplies,
-            &token_id
-        );
+        // Get current total revenue for token and holder 
         let revenue = vec_map::get_mut(&mut collection.revenues, &token_id);
         let total_revenue = balance::value(revenue);
-        let share = (total_revenue * nft.balance) / total_supply;
+        
+        // Calculate new revenue since last withdrawal
+        let new_revenue = total_revenue - nft.last_withdrawn_revenue;
+        assert!(new_revenue > 0, ENO_NEW_REVENUE);
+
+        // Calculate share of new revenue only
+        let total_supply = *vec_map::get(&collection.token_supplies, &token_id);
+        let share = (new_revenue * nft.balance) / total_supply;
+
+        // Update last withdrawn amount before transfer to prevent reentrancy
+        nft.last_withdrawn_revenue = total_revenue;
 
         // Transfer revenue share
         let revenue_share = coin::from_balance(balance::split(revenue, share), ctx);
@@ -379,11 +394,12 @@ module erc1155::erc1155 {
     ) {
         assert!(nft.balance >= amount, ENO_BALANCE);
 
-        // Create new NFT for recipient
+        // Create new NFT for recipient with same withdrawal tracking
         let new_nft = NFT {
             id: object::new(ctx),
             token_id: nft.token_id,
-            balance: amount
+            balance: amount,
+            last_withdrawn_revenue: nft.last_withdrawn_revenue // Copy withdrawal state
         };
 
         // Update balances
@@ -394,22 +410,26 @@ module erc1155::erc1155 {
 
     /*
     * Merges two NFTs with the same token_id
-    * Not Requirements:
-    *
-    * Allows merging multiple NFTs of the same type into one
-    * Reduces the number of objects to manage
-    * Convenient for transferring large quantities
-    *
+    * Requirements:
     * @Param nft1 The NFT to merge into
     * @Param nft2 The NFT to merge from
     * - Both NFTs must have the same token_id
+    * Effects:
+    * - Takes maximum last_withdrawn_revenue to be conservative
     */
     public entry fun merge(nft1: &mut NFT, nft2: NFT) {
         assert!(
             nft1.token_id == nft2.token_id,
             ETOKEN_NOT_EXIST
         );
-        let NFT {id, token_id: _, balance} = nft2;
+        
+        // When merging, take the maximum last_withdrawn_revenue to be conservative
+        nft1.last_withdrawn_revenue = if (nft1.last_withdrawn_revenue > nft2.last_withdrawn_revenue) 
+            nft1.last_withdrawn_revenue 
+        else 
+            nft2.last_withdrawn_revenue;
+            
+        let NFT {id, token_id: _, balance, last_withdrawn_revenue: _} = nft2;
         nft1.balance = nft1.balance + balance;
         object::delete(id);
     }
@@ -428,10 +448,7 @@ module erc1155::erc1155 {
         token_id: ID,
         amount: u64
     ) {
-        if (!vec_map::contains(
-                &collection.holder_balances,
-                &holder
-            )) {
+        if (!vec_map::contains(&collection.holder_balances, &holder)) {
             vec_map::insert(
                 &mut collection.holder_balances,
                 holder,
@@ -461,7 +478,7 @@ module erc1155::erc1155 {
 
     /*
     * @dev Returns the token ID associated with a given NFT
-    * @param nft The NFT to get token ID for
+    * @param nft The NFT to get token ID for  
     * @return The token ID of the NFT
     */
     public fun token_id(nft: &NFT): ID {
@@ -470,27 +487,21 @@ module erc1155::erc1155 {
 
     /*
     * @dev Checks if a token exists in the collection
-    * @param collection The NFT collection
+    * @param collection The NFT collection  
     * @param token_id The token ID to check
     * @return true if token exists, false otherwise
     */
     public fun token_exists(collection: &Collection, token_id: ID): bool {
-        vec_map::contains(
-            &collection.token_supplies,
-            &token_id
-        )
+        vec_map::contains(&collection.token_supplies, &token_id)
     }
 
     /*
     * @dev Checks if an address is registered as an operator
     * @param collection The NFT collection
     * @param addr The address to check
-    * @return true if address is an operator, false otherwise
+    * @return true if address is an operator, false otherwise  
     */
-    public fun is_operator(
-        collection: &Collection,
-        addr: address
-    ): bool {
+    public fun is_operator(collection: &Collection, addr: address): bool {
         vector::contains(&collection.operators, &addr)
     }
 
@@ -501,10 +512,7 @@ module erc1155::erc1155 {
     * @return The total supply of the token
     */
     public fun total_supply(collection: &Collection, token_id: ID): u64 {
-        *vec_map::get(
-            &collection.token_supplies,
-            &token_id
-        )
+        *vec_map::get(&collection.token_supplies, &token_id)
     }
 
     /*
@@ -514,22 +522,26 @@ module erc1155::erc1155 {
     * @return Reference to the token's metadata
     */
     public fun get_metadata(collection: &Collection, token_id: ID): &TokenMetadata {
-        bag::borrow(
-            &collection.token_metadata,
-            token_id
-        )
+        bag::borrow(&collection.token_metadata, token_id)
     }
 
     /*
     * @dev Returns the revenue balance for a given token
-    * @param collection The NFT collection
+    * @param collection The NFT collection  
     * @param token_id The token ID to check revenue for
     * @return The revenue balance of the token
     */
     public fun get_revenue_balance(collection: &Collection, token_id: ID): u64 {
-        balance::value(
-            vec_map::get(&collection.revenues, &token_id)
-        )
+        balance::value(vec_map::get(&collection.revenues, &token_id))
+    }
+
+    /*
+    * @dev Returns the last withdrawn revenue amount for an NFT
+    * @param nft The NFT to check
+    * @return The last withdrawn revenue amount
+    */
+    public fun get_last_withdrawn_revenue(nft: &NFT): u64 {
+        nft.last_withdrawn_revenue
     }
 
     /*
