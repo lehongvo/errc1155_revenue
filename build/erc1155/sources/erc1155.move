@@ -19,10 +19,12 @@ module erc1155::erc1155 {
     /*
     * Revenue epoch struct tracking each deposit event
     * amount: Amount deposited
+    * total_supply: Total supply at deposit time
     * withdrawn_addresses: Addresses that have withdrawn revenue
     */
     public struct RevenueEpoch has store {
         amount: u64,
+        total_supply: u64, // Track supply at time of deposit
         withdrawn_addresses: VecMap<address, bool>
     }
 
@@ -37,7 +39,7 @@ module erc1155::erc1155 {
         id: UID,
         token_id: ID,
         balance: u64,
-        epochs_withdrawn: vector<u64> // Track withdrawn epochs
+        epochs_withdrawn: vector<u64>
     }
 
     /*
@@ -90,10 +92,12 @@ module erc1155::erc1155 {
     * operator: Operator address
     * amount: Amount deposited
     */
+
     public struct RevenueDeposited has copy, drop {
         token_id: ID,
         operator: address,
-        amount: u64
+        amount: u64,
+        total_supply: u64
     }
 
     /*
@@ -312,7 +316,6 @@ module erc1155::erc1155 {
         ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
-
         assert!(
             vector::contains(&collection.operators, &sender),
             ENO_OPERATOR
@@ -330,21 +333,30 @@ module erc1155::erc1155 {
         let paid = coin::split(payment, amount, ctx);
         balance::join(revenue, coin::into_balance(paid));
 
+        // Get current supply for this epoch
+        let current_supply = *vec_map::get(
+            &collection.token_supplies,
+            &token_id
+        );
+
         let epoch = RevenueEpoch {
             amount,
+            total_supply: current_supply, // Store current supply
             withdrawn_addresses: vec_map::empty()
         };
+
         let revenue_epochs = vec_map::get_mut(
             &mut collection.revenue_epochs,
             &token_id
         );
-        revenue_epochs.push_back(epoch);
+        vector::push_back(revenue_epochs, epoch);
 
         event::emit(
             RevenueDeposited {
                 token_id,
                 operator: sender,
-                amount
+                amount,
+                total_supply: current_supply
             }
         );
     }
@@ -372,7 +384,7 @@ module erc1155::erc1155 {
             &mut collection.revenue_epochs,
             &token_id
         );
-        let mut total_revenue: u64 = 0;
+        let mut total_share: u64 = 0;
         let mut withdrawn_epochs = vector::empty();
         let revenue_epochs_len = vector::length(revenue_epochs);
 
@@ -380,25 +392,20 @@ module erc1155::erc1155 {
         while (i < revenue_epochs_len) {
             if (!vector::contains(&nft.epochs_withdrawn, &i)) {
                 let epoch = vector::borrow(revenue_epochs, i);
-                total_revenue = total_revenue + epoch.amount;
+                let epoch_share = (epoch.amount * nft.balance) / epoch.total_supply;
+                total_share = total_share + epoch_share;
                 vector::push_back(&mut withdrawn_epochs, i);
             };
             i = i + 1;
         };
 
-        assert!(total_revenue > 0, ENO_NEW_REVENUE);
+        assert!(total_share > 0, ENO_NEW_REVENUE);
 
-        let total_supply = *vec_map::get(
-            &collection.token_supplies,
-            &token_id
-        );
-        let share = (total_revenue * nft.balance) / total_supply;
-
-        // Transfer revenue share
+        // Transfer accumulated shares
         let revenue_share = coin::from_balance(
             balance::split(
                 vec_map::get_mut(&mut collection.revenues, &token_id),
-                share
+                total_share
             ),
             ctx
         );
@@ -427,7 +434,7 @@ module erc1155::erc1155 {
             RevenueWithdrawn {
                 token_id,
                 holder: sender,
-                amount: share,
+                amount: total_share,
                 epochs: withdrawn_epochs
             }
         );
