@@ -8,47 +8,45 @@ module erc1155::erc1155 {
     use sui::bag::{Self, Bag};
     use sui::vec_map::{Self, VecMap};
 
-    /* Error codes for contract operations */
-    const ENO_MINT_AUTHORITY: u64 = 1; // Mint authority required for operation
-    const ENO_OPERATOR: u64 = 2; // Operator required for operation
-    const ETOKEN_NOT_EXIST: u64 = 3; // Token does not exist
-    const ENO_BALANCE: u64 = 4; // Insufficient balance
-    const EINVALID_AMOUNT: u64 = 5; // Invalid amount
-    const ENO_NEW_REVENUE: u64 = 6; // No new revenue to withdraw
+    /* Error codes */
+    const ENO_MINT_AUTHORITY: u64 = 1;
+    const ENO_OPERATOR: u64 = 2;
+    const ETOKEN_NOT_EXIST: u64 = 3;
+    const ENO_BALANCE: u64 = 4;
+    const EINVALID_AMOUNT: u64 = 5;
+    const ENO_NEW_REVENUE: u64 = 6;
+    const EINVALID_RECIPIENT: u64 = 7;
+    const EZERO_SUPPLY: u64 = 8;
+    const EOVERFLOW: u64 = 12;
 
-    /*
-    * Revenue epoch struct tracking each deposit event
-    * amount: Amount deposited
-    * total_supply: Total supply at deposit time
-    * withdrawn_addresses: Addresses that have withdrawn revenue
-    */
+    /* Structs */
     public struct RevenueEpoch has store {
+        epoch_id: u64,
         amount: u64,
-        total_supply: u64, // Track supply at time of deposit
-        withdrawn_addresses: VecMap<address, bool>
+        total_supply: u64,
+        withdrawn_addresses: VecMap<address, bool>,
+        cumulative_amount: u64,
+        timestamp: u64
     }
 
-    /*
-    * Main NFT token struct representing ownership of tokens
-    * id: Unique identifier
-    * token_id: Token type identifier
-    * balance: Token balance
-    * epochs_withdrawn: Vector tracking withdrawn epochs
-    */
+    public struct WithdrawalInfo has drop {
+        withdrawable_amount: u64,
+        withdrawn_epochs: vector<u64>,
+        remaining_unclaimed: u64,
+        total_shares: u64
+    }
+
     public struct NFT has key, store {
         id: UID,
         token_id: ID,
         balance: u64,
-        epochs_withdrawn: vector<u64>
+        claimed_revenue: u64,
+        epochs_withdrawn: vector<u64>,
+        last_epoch_claimed: u64,
+        created_at: u64,
+        last_transfer_time: u64
     }
 
-    /*
-    * Collection struct managing all token types and revenue distribution
-    * id: Unique identifier
-    * mint_authority: Address with minting authority
-    * operators: Vector of operator addresses
-    * token_supplies: Map of token type to total supply
-    */
     public struct Collection has key {
         id: UID,
         mint_authority: address,
@@ -57,97 +55,70 @@ module erc1155::erc1155 {
         token_metadata: Bag,
         revenues: VecMap<ID, Balance<SUI>>,
         holder_balances: VecMap<address, VecMap<ID, u64>>,
-        revenue_epochs: VecMap<ID, vector<RevenueEpoch>>
+        revenue_epochs: VecMap<ID, vector<RevenueEpoch>>,
+        epoch_counter: VecMap<ID, u64>,
+        total_revenue: VecMap<ID, u64>,
+        created_at: u64
     }
 
-    /*
-    * Metadata struct storing token type information
-    * name: Token name
-    * description: Token description
-    * uri: Token URI
-    */
     public struct TokenMetadata has store {
+        name: String,
+        description: String,
+        uri: String,
+        created_at: u64,
+        properties: Option<VecMap<String, String>>
+    }
+
+    /* Events */
+    public struct TokenMinted has copy, drop {
+        token_id: ID,
+        creator: address,
+        recipient: address,
+        amount: u64,
+        metadata: TokenMetadataEvent,
+        timestamp: u64
+    }
+
+    public struct TokenMetadataEvent has copy, drop {
         name: String,
         description: String,
         uri: String
     }
 
-    /*
-    * TokenMinted: Emitted when a new token is minted
-    * token_id: Token type identifier
-    * creator: Creator address
-    * recipient: Recipient address
-    * amount: Amount minted
-    */
-    public struct TokenMinted has copy, drop {
-        token_id: ID,
-        creator: address,
-        recipient: address,
-        amount: u64
-    }
-
-    /*
-    * RevenueDeposited: Emitted when revenue is deposited
-    * token_id: Token type identifier
-    * operator: Operator address
-    * amount: Amount deposited
-    */
-
     public struct RevenueDeposited has copy, drop {
         token_id: ID,
         operator: address,
         amount: u64,
-        total_supply: u64
+        total_supply: u64,
+        epoch_id: u64,
+        cumulative_amount: u64,
+        timestamp: u64
     }
 
-    /*
-    * RevenueWithdrawn: Emitted when revenue is withdrawn
-    * token_id: Token type identifier
-    * holder: Holder address
-    * amount: Amount withdrawn
-    * epochs: Vector of withdrawn epochs
-    */
     public struct RevenueWithdrawn has copy, drop {
         token_id: ID,
         holder: address,
         amount: u64,
-        epochs: vector<u64>
+        epochs: vector<u64>,
+        remaining_balance: u64,
+        remaining_unclaimed: u64,
+        remaining_claimable: u64,
+        total_claimed: u64,
+        holder_balance: u64,
+        timestamp: u64
     }
 
-    /*
-    * TokenTransferred: Emitted when tokens are transferred
-    * token_id: Token type identifier
-    * from: Sender address
-    * to: Recipient address
-    * amount: Amount transferred
-    */
     public struct TokenTransferred has copy, drop {
         token_id: ID,
         from: address,
         to: address,
-        amount: u64
+        amount: u64,
+        transferred_revenue: u64,
+        epoch_context: vector<u64>,
+        timestamp: u64
     }
 
-    /*
-    * TokensMerged: Emitted when tokens are merged
-    * token_id: Token type identifier
-    * holder: Holder address
-    * total_balance: Total balance after merge
-    */
-    public struct TokensMerged has copy, drop {
-        token_id: ID,
-        holder: address,
-        total_balance: u64
-    }
-
-    /*
-    * Initializes a new collection
-    * Creates a shared collection object with sender as mint authority
-    * @param ctx Transaction context
-    * Note: This function is only called once during contract deployment
-    * Note: The mint authority is set to the sender of the transaction
-    * Note: The collection object is shared to allow access from other modules
-    */
+    /* Core functions */
     fun init(ctx: &mut TxContext) {
         let collection = Collection {
             id: object::new(ctx),
@@ -157,80 +128,37 @@ module erc1155::erc1155 {
             token_metadata: bag::new(ctx),
             revenues: vec_map::empty(),
             holder_balances: vec_map::empty(),
-            revenue_epochs: vec_map::empty()
+            revenue_epochs: vec_map::empty(),
+            epoch_counter: vec_map::empty(),
+            total_revenue: vec_map::empty(),
+            created_at: tx_context::epoch(ctx)
         };
         transfer::share_object(collection);
     }
 
-    /*
-    * Adds a new operator address
-    * @param collection Collection object
-    * @param operator Operator address
-    * @param ctx Transaction context
-    */
     public entry fun add_operator(
         collection: &mut Collection,
         operator: address,
         ctx: &mut TxContext
     ) {
-        assert!(
-            collection.mint_authority == tx_context::sender(ctx),
-            ENO_MINT_AUTHORITY
-        );
+        assert!(collection.mint_authority == tx_context::sender(ctx), ENO_MINT_AUTHORITY);
         if (!vector::contains(&collection.operators, &operator)) {
             vector::push_back(&mut collection.operators, operator);
-        }
+        };
     }
 
-    /*
-    * Removes an operator address
-    * @param collection Collection object
-    * @param operator Operator address
-    * @param ctx Transaction context
-    */
     public entry fun remove_operator(
         collection: &mut Collection,
         operator: address,
         ctx: &mut TxContext
     ) {
-        assert!(
-            collection.mint_authority == tx_context::sender(ctx),
-            ENO_MINT_AUTHORITY
-        );
+        assert!(collection.mint_authority == tx_context::sender(ctx), ENO_MINT_AUTHORITY);
         let (exists, index) = vector::index_of(&collection.operators, &operator);
         if (exists) {
             vector::remove(&mut collection.operators, index);
         };
     }
 
-    /*
-    * Transfers mint authority to a new address
-    * @param collection Collection object
-    * @param new_authority New mint authority address
-    * @param ctx Transaction context
-    */
-    public entry fun transfer_authority(
-        collection: &mut Collection,
-        new_authority: address,
-        ctx: &mut TxContext
-    ) {
-        assert!(
-            collection.mint_authority == tx_context::sender(ctx),
-            ENO_MINT_AUTHORITY
-        );
-        collection.mint_authority = new_authority;
-    }
-
-    /*
-    * Mints new tokens and transfers to recipient
-    * @param collection Collection object
-    * @param name Token name
-    * @param description Token description
-    * @param uri Token URI
-    * @param amount Amount to mint
-    * @param recipient Recipient address
-    * @param ctx Transaction context
-    */
     public entry fun mint(
         collection: &mut Collection,
         name: vector<u8>,
@@ -240,44 +168,36 @@ module erc1155::erc1155 {
         recipient: address,
         ctx: &mut TxContext
     ) {
-        assert!(
-            collection.mint_authority == tx_context::sender(ctx),
-            ENO_MINT_AUTHORITY
-        );
+        assert!(collection.mint_authority == tx_context::sender(ctx), ENO_MINT_AUTHORITY);
+        assert!(amount > 0, EINVALID_AMOUNT);
 
         let token_id = object::new(ctx);
+        let current_time = tx_context::epoch(ctx);
+
         let metadata = TokenMetadata {
             name: string::utf8(name),
             description: string::utf8(description),
-            uri: string::utf8(uri)
+            uri: string::utf8(uri),
+            created_at: current_time,
+            properties: option::none()
         };
 
-        bag::add(
-            &mut collection.token_metadata,
-            object::uid_to_inner(&token_id),
-            metadata
-        );
-        vec_map::insert(
-            &mut collection.token_supplies,
-            object::uid_to_inner(&token_id),
-            amount
-        );
-        vec_map::insert(
-            &mut collection.revenues,
-            object::uid_to_inner(&token_id),
-            balance::zero()
-        );
-        vec_map::insert(
-            &mut collection.revenue_epochs,
-            object::uid_to_inner(&token_id),
-            vector::empty()
-        );
+        bag::add(&mut collection.token_metadata, object::uid_to_inner(&token_id), metadata);
+        vec_map::insert(&mut collection.token_supplies, object::uid_to_inner(&token_id), amount);
+        vec_map::insert(&mut collection.revenues, object::uid_to_inner(&token_id), balance::zero());
+        vec_map::insert(&mut collection.revenue_epochs, object::uid_to_inner(&token_id), vector::empty());
+        vec_map::insert(&mut collection.epoch_counter, object::uid_to_inner(&token_id), 0);
+        vec_map::insert(&mut collection.total_revenue, object::uid_to_inner(&token_id), 0);
 
         let nft = NFT {
             id: object::new(ctx),
             token_id: object::uid_to_inner(&token_id),
             balance: amount,
-            epochs_withdrawn: vector::empty()
+            claimed_revenue: 0,
+            epochs_withdrawn: vector::empty(),
+            last_epoch_claimed: 0,
+            created_at: current_time,
+            last_transfer_time: current_time
         };
 
         update_holder_balance(
@@ -287,27 +207,25 @@ module erc1155::erc1155 {
             amount
         );
 
-        event::emit(
-            TokenMinted {
-                token_id: object::uid_to_inner(&token_id),
-                creator: tx_context::sender(ctx),
-                recipient,
-                amount
-            }
-        );
+        let metadata_event = TokenMetadataEvent {
+            name: string::utf8(name),
+            description: string::utf8(description),
+            uri: string::utf8(uri)
+        };
+
+        event::emit(TokenMinted {
+            token_id: object::uid_to_inner(&token_id),
+            creator: tx_context::sender(ctx),
+            recipient,
+            amount,
+            metadata: metadata_event,
+            timestamp: current_time
+        });
 
         transfer::public_transfer(nft, recipient);
         object::delete(token_id);
     }
 
-    /*
-    * Deposits revenue for a token type into the collection
-    * @param collection Collection object
-    * @param token_id Token type identifier
-    * @param payment Payment coin
-    * @param amount Amount to deposit
-    * @param ctx Transaction context
-    */
     public entry fun deposit_revenue(
         collection: &mut Collection,
         token_id: ID,
@@ -316,172 +234,165 @@ module erc1155::erc1155 {
         ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
-        assert!(
-            vector::contains(&collection.operators, &sender),
-            ENO_OPERATOR
-        );
-        assert!(
-            vec_map::contains(&collection.revenues, &token_id),
-            ETOKEN_NOT_EXIST
-        );
-        assert!(
-            coin::value(payment) >= amount,
-            EINVALID_AMOUNT
-        );
+        assert!(vector::contains(&collection.operators, &sender), ENO_OPERATOR);
+        assert!(vec_map::contains(&collection.token_supplies, &token_id), ETOKEN_NOT_EXIST);
+        
+        let current_supply = *vec_map::get(&collection.token_supplies, &token_id);
+        assert!(current_supply > 0, EZERO_SUPPLY);
+        assert!(coin::value(payment) >= amount && amount > 0, EINVALID_AMOUNT);
 
+        // Update total revenue
+        if (!vec_map::contains(&collection.total_revenue, &token_id)) {
+            vec_map::insert(&mut collection.total_revenue, token_id, 0);
+        };
+        let total_revenue = vec_map::get_mut(&mut collection.total_revenue, &token_id);
+        *total_revenue = safe_add(*total_revenue, amount);
+
+        // Get or initialize epoch counter
+        let epoch_counter = if (vec_map::contains(&collection.epoch_counter, &token_id)) {
+            vec_map::get_mut(&mut collection.epoch_counter, &token_id)
+        } else {
+            vec_map::insert(&mut collection.epoch_counter, token_id, 0);
+            vec_map::get_mut(&mut collection.epoch_counter, &token_id)
+        };
+
+        // Calculate cumulative amount
+        let previous_cumulative = if (!vec_map::contains(&collection.revenue_epochs, &token_id)) {
+            vec_map::insert(&mut collection.revenue_epochs, token_id, vector::empty());
+            0
+        } else {
+            let epochs = vec_map::get(&collection.revenue_epochs, &token_id);
+            if (vector::is_empty(epochs)) {
+                0
+            } else {
+                let last_epoch = vector::borrow(epochs, vector::length(epochs) - 1);
+                last_epoch.cumulative_amount
+            }
+        };
+
+        // Create new epoch
+        let new_epoch = RevenueEpoch {
+            epoch_id: *epoch_counter,
+            amount,
+            total_supply: current_supply,
+            withdrawn_addresses: vec_map::empty(),
+            cumulative_amount: safe_add(previous_cumulative, amount),
+            timestamp: tx_context::epoch(ctx)
+        };
+
+        *epoch_counter = *epoch_counter + 1;
+
+        // Add revenue to balance
         let revenue = vec_map::get_mut(&mut collection.revenues, &token_id);
         let paid = coin::split(payment, amount, ctx);
         balance::join(revenue, coin::into_balance(paid));
 
-        let current_supply = *vec_map::get(
-            &collection.token_supplies,
-            &token_id
-        );
+        // Add epoch
+        let epochs = vec_map::get_mut(&mut collection.revenue_epochs, &token_id);
+        vector::push_back(epochs, new_epoch);
 
-        let epoch = RevenueEpoch {
+        event::emit(RevenueDeposited {
+            token_id,
+            operator: sender,
             amount,
             total_supply: current_supply,
-            withdrawn_addresses: vec_map::empty()
-        };
-
-        let revenue_epochs = vec_map::get_mut(
-            &mut collection.revenue_epochs,
-            &token_id
-        );
-        vector::push_back(revenue_epochs, epoch);
-
-        event::emit(
-            RevenueDeposited {
-                token_id,
-                operator: sender,
-                amount,
-                total_supply: current_supply
-            }
-        );
+            epoch_id: *epoch_counter - 1,
+            cumulative_amount: safe_add(previous_cumulative, amount),
+            timestamp: tx_context::epoch(ctx)
+        });
     }
 
-    /*
-    * Withdraws revenue share for token holder
-    * @param collection Collection object
-    * @param nft NFT object
-    * @param ctx Transaction context
-    */
     public entry fun withdraw_revenue(
         collection: &mut Collection,
         nft: &mut NFT,
         ctx: &mut TxContext
     ) {
+        // Basic validations
         let sender = tx_context::sender(ctx);
         let token_id = nft.token_id;
 
-        assert!(
-            vec_map::contains(&collection.revenues, &token_id),
-            ETOKEN_NOT_EXIST
+        assert!(vec_map::contains(&collection.revenues, &token_id), ETOKEN_NOT_EXIST);
+        assert!(nft.balance > 0, ENO_BALANCE);
+
+        // Get revenue epochs
+        let revenue_epochs = vec_map::get_mut(&mut collection.revenue_epochs, &token_id);
+        let current_epoch = vector::length(revenue_epochs);
+        
+        // Skip if no new epochs since last claim
+        assert!(current_epoch > nft.last_epoch_claimed, ENO_NEW_REVENUE);
+
+        // Calculate withdrawal amounts
+        let withdrawal_info = calculate_withdrawal_amounts(
+            revenue_epochs,
+            nft.balance,
+            nft.last_epoch_claimed,
+            current_epoch,
+            sender
         );
 
-        let revenue_epochs = vec_map::get_mut(
-            &mut collection.revenue_epochs,
-            &token_id
-        );
-        let mut total_share: u64 = 0;
-        let mut withdrawn_epochs = vector::empty();
-        let revenue_epochs_len = vector::length(revenue_epochs);
+        assert!(withdrawal_info.withdrawable_amount > 0, ENO_NEW_REVENUE);
 
+        // Track withdrawn epochs
         let mut i = 0;
-        while (i < revenue_epochs_len) {
-            if (!vector::contains(&nft.epochs_withdrawn, &i)) {
-                let epoch = vector::borrow(revenue_epochs, i);
-                let epoch_share = (epoch.amount * nft.balance) / epoch.total_supply;
-                total_share = total_share + epoch_share;
-                vector::push_back(&mut withdrawn_epochs, i);
-            };
+        let epochs_len = vector::length(&withdrawal_info.withdrawn_epochs);
+        while (i < epochs_len) {
+            let epoch_index = *vector::borrow(&withdrawal_info.withdrawn_epochs, i);
+            let epoch = vector::borrow_mut(revenue_epochs, epoch_index);
+            vec_map::insert(&mut epoch.withdrawn_addresses, sender, true);
             i = i + 1;
         };
 
-        assert!(total_share > 0, ENO_NEW_REVENUE);
+        // Update NFT state
+        nft.claimed_revenue = safe_add(
+            nft.claimed_revenue, 
+            withdrawal_info.withdrawable_amount
+        );
+        nft.last_epoch_claimed = current_epoch;
+        vector::append(&mut nft.epochs_withdrawn, withdrawal_info.withdrawn_epochs);
 
-        // Transfer accumulated shares
-        let revenue_share = coin::from_balance(
-            balance::split(
-                vec_map::get_mut(&mut collection.revenues, &token_id),
-                total_share
-            ),
+        // Calculate remaining claimable revenue
+        let total_revenue = if (vec_map::contains(&collection.total_revenue, &token_id)) {
+            *vec_map::get(&collection.total_revenue, &token_id)
+        } else {
+            0
+        };
+
+        let remaining_claimable = if (total_revenue > withdrawal_info.total_shares) {
+            total_revenue - withdrawal_info.total_shares
+        } else {
+            0
+        };
+
+        // Perform revenue transfer
+        let revenue_balance = vec_map::get_mut(&mut collection.revenues, &token_id);
+        assert!(
+            balance::value(revenue_balance) >= withdrawal_info.withdrawable_amount,
+            EINVALID_AMOUNT
+        );
+
+        let withdrawal = coin::from_balance(
+            balance::split(revenue_balance, withdrawal_info.withdrawable_amount),
             ctx
         );
-        transfer::public_transfer(revenue_share, sender);
 
-        // Update withdrawn epochs
-        let mut j = 0;
-        while (
-            j < vector::length(&withdrawn_epochs)
-        ) {
-            let epoch_index = *vector::borrow(&withdrawn_epochs, j);
-            let epoch = vector::borrow_mut(revenue_epochs, epoch_index);
-            vec_map::insert(
-                &mut epoch.withdrawn_addresses,
-                sender,
-                true
-            );
-            vector::push_back(
-                &mut nft.epochs_withdrawn,
-                epoch_index
-            );
-            j = j + 1;
-        };
+        // Emit detailed event
+        event::emit(RevenueWithdrawn {
+            token_id,
+            holder: sender,
+            amount: withdrawal_info.withdrawable_amount,
+            epochs: withdrawal_info.withdrawn_epochs,
+            remaining_balance: balance::value(revenue_balance),
+            remaining_unclaimed: withdrawal_info.remaining_unclaimed,
+            remaining_claimable,
+            total_claimed: nft.claimed_revenue,
+            holder_balance: nft.balance,
+            timestamp: tx_context::epoch(ctx)
+        });
 
-        event::emit(
-            RevenueWithdrawn {
-                token_id,
-                holder: sender,
-                amount: total_share,
-                epochs: withdrawn_epochs
-            }
-        );
+        // Transfer revenue to sender
+        transfer::public_transfer(withdrawal, sender);
     }
 
-    /*
-    * Updates holder balance tracking for a given token
-    * @param collection Collection object
-    * @param holder Holder address
-    * @param token_id Token type identifier
-    * @param amount Amount to update
-    */
-    fun update_holder_balance(
-        collection: &mut Collection,
-        holder: address,
-        token_id: ID,
-        amount: u64
-    ) {
-        if (!vec_map::contains(
-                &collection.holder_balances,
-                &holder
-            )) {
-            vec_map::insert(
-                &mut collection.holder_balances,
-                holder,
-                vec_map::empty()
-            );
-        };
-        let balances = vec_map::get_mut(
-            &mut collection.holder_balances,
-            &holder
-        );
-        if (!vec_map::contains(balances, &token_id)) {
-            vec_map::insert(balances, token_id, amount);
-        } else {
-            let balance = vec_map::get_mut(balances, &token_id);
-            *balance = *balance + amount;
-        }
-    }
-
-    /*
-    * Transfers tokens to another address
-    * @param collection Collection object
-    * @param nft NFT object
-    * @param amount Amount to transfer
-    * @param recipient Recipient address
-    * @param ctx Transaction context
-    */
     public entry fun transfer(
         collection: &mut Collection,
         nft: &mut NFT,
@@ -491,182 +402,209 @@ module erc1155::erc1155 {
     ) {
         let sender = tx_context::sender(ctx);
         assert!(nft.balance >= amount, ENO_BALANCE);
+        assert!(amount > 0, EINVALID_AMOUNT);
+        assert!(recipient != sender, EINVALID_RECIPIENT);
+        assert!(token_exists(collection, nft.token_id), ETOKEN_NOT_EXIST);
 
+        // Calculate claimed revenue share for transfer amount
+        let (transfer_claimed_revenue, _) = safe_calculate_share(
+            nft.claimed_revenue,
+            amount,
+            nft.balance
+        );
+
+        // Create withdrawal history for recipient
+        let mut recipient_epochs = vector::empty();
+        let epochs_len = vector::length(&nft.epochs_withdrawn);
+        let mut i = 0;
+
+        while (i < epochs_len) {
+            let epoch_id = *vector::borrow(&nft.epochs_withdrawn, i);
+            vector::push_back(&mut recipient_epochs, epoch_id);
+            i = i + 1;
+        };
+
+        let current_time = tx_context::epoch(ctx);
+
+        // Create new NFT for recipient
         let new_nft = NFT {
             id: object::new(ctx),
             token_id: nft.token_id,
             balance: amount,
-            epochs_withdrawn: vector::empty()
+            claimed_revenue: transfer_claimed_revenue, // Chỉ transfer phần đã claim
+            epochs_withdrawn: recipient_epochs,
+            last_epoch_claimed: nft.last_epoch_claimed,
+            created_at: current_time,
+            last_transfer_time: current_time
         };
 
+        // Update sender's NFT
         nft.balance = nft.balance - amount;
+        nft.claimed_revenue = safe_sub(nft.claimed_revenue, transfer_claimed_revenue);
+        nft.last_transfer_time = current_time;
 
-        if (!vec_map::contains(
-                &collection.holder_balances,
-                &sender
-            )) {
-            vec_map::insert(
-                &mut collection.holder_balances,
-                sender,
-                vec_map::empty()
-            );
-        };
-        let sender_balances = vec_map::get_mut(
-            &mut collection.holder_balances,
-            &sender
+        // Update holder balances
+        update_holder_balance(collection, sender, nft.token_id, nft.balance);
+        update_holder_balance(collection, recipient, nft.token_id, amount);
+
+        // Update epoch withdrawal records
+        let mut_revenue_epochs = vec_map::get_mut(
+            &mut collection.revenue_epochs,
+            &nft.token_id
         );
-        if (!vec_map::contains(sender_balances, &nft.token_id)) {
-            vec_map::insert(sender_balances, nft.token_id, 0);
-        } else {
-            let balance = vec_map::get_mut(sender_balances, &nft.token_id);
-            *balance = *balance - amount;
-        };
-
-        update_holder_balance(
-            collection,
-            recipient,
-            nft.token_id,
-            amount
-        );
-
-        event::emit(
-            TokenTransferred {
-                token_id: nft.token_id,
-                from: sender,
-                to: recipient,
-                amount
-            }
-        );
-
-        transfer::public_transfer(new_nft, recipient);
-    }
-
-    /*
-    * Merges two NFTs with the same token_id
-    * @param nft1 First NFT object
-    * @param nft2 Second NFT object
-    */
-    public entry fun merge(
-        nft1: &mut NFT,
-        nft2: NFT,
-        ctx: &mut TxContext
-    ) {
-        assert!(
-            nft1.token_id == nft2.token_id,
-            ETOKEN_NOT_EXIST
-        );
-
-        // Merge epochs_withdrawn without duplicates
-        let mut i = 0;
-        let len = vector::length(&nft2.epochs_withdrawn);
-        while (i < len) {
-            let epoch = *vector::borrow(&nft2.epochs_withdrawn, i);
-            if (!vector::contains(&nft1.epochs_withdrawn, &epoch)) {
-                vector::push_back(&mut nft1.epochs_withdrawn, epoch);
+            
+        i = 0;
+        let total_epochs = vector::length(mut_revenue_epochs);
+            
+        while (i < total_epochs) {
+            let epoch = vector::borrow_mut(mut_revenue_epochs, i);
+            if (vec_map::contains(&epoch.withdrawn_addresses, &sender)) {
+                let (epoch_share, _) = safe_calculate_share(
+                    epoch.amount,
+                    amount,
+                    epoch.total_supply
+                );
+                if (epoch_share > 0) {
+                    vec_map::insert(&mut epoch.withdrawn_addresses, recipient, true);
+                }
             };
             i = i + 1;
         };
 
-        let NFT {
-            id,
-            token_id: _,
-            balance,
-            epochs_withdrawn: _
-        } = nft2;
-        nft1.balance = nft1.balance + balance;
+        // Emit transfer event
+        event::emit(TokenTransferred {
+            token_id: nft.token_id,
+            from: sender,
+            to: recipient,
+            amount,
+            transferred_revenue: transfer_claimed_revenue,
+            epoch_context: recipient_epochs,
+            timestamp: current_time
+        });
 
-        event::emit(
-            TokensMerged {
-                token_id: nft1.token_id,
-                holder: tx_context::sender(ctx),
-                total_balance: nft1.balance
-            }
-        );
-
-        object::delete(id);
+        transfer::public_transfer(new_nft, recipient);
     }
 
-    /*
-    * @dev Returns the token balance of a given NFT
-    * @param nft NFT object
-    */
-    public fun balance(nft: &NFT): u64 {
-        nft.balance
+    /* Helper functions */
+    fun calculate_withdrawal_amounts(
+        revenue_epochs: &mut vector<RevenueEpoch>,
+        holder_balance: u64,
+        last_claimed: u64,
+        current_epoch: u64,
+        sender: address
+    ): WithdrawalInfo {
+        let mut withdrawable_amount: u64 = 0;
+        let mut withdrawn_epochs = vector::empty();
+        let mut remaining_unclaimed: u64 = 0;
+        let mut total_shares: u64 = 0;
+        let mut i = last_claimed;
+
+        while (i < current_epoch) {
+            let epoch = vector::borrow_mut(revenue_epochs, i);
+            
+            if (!vec_map::contains(&epoch.withdrawn_addresses, &sender)) {
+                let (epoch_share, unclaimed) = safe_calculate_share(
+                    epoch.amount,
+                    holder_balance,
+                    epoch.total_supply
+                );
+
+                if (epoch_share > 0) {
+                    withdrawable_amount = safe_add(withdrawable_amount, epoch_share);
+                    vector::push_back(&mut withdrawn_epochs, i);
+                    total_shares = safe_add(total_shares, epoch_share);
+                };
+
+                remaining_unclaimed = safe_add(remaining_unclaimed, unclaimed);
+            };
+            i = i + 1;
+        };
+
+        WithdrawalInfo {
+            withdrawable_amount,
+            withdrawn_epochs,
+            remaining_unclaimed,
+            total_shares
+        }
     }
 
-    /*
-    * @dev Returns the token ID associated with a given NFT
-    * @param nft NFT object
-    */
-    public fun token_id(nft: &NFT): ID {
-        nft.token_id
+    fun update_holder_balance(
+        collection: &mut Collection,
+        holder: address,
+        token_id: ID,
+        amount: u64
+    ) {
+        if (!vec_map::contains(&collection.holder_balances, &holder)) {
+            vec_map::insert(&mut collection.holder_balances, holder, vec_map::empty());
+        };
+        
+        let balances = vec_map::get_mut(&mut collection.holder_balances, &holder);
+        if (!vec_map::contains(balances, &token_id)) {
+            vec_map::insert(balances, token_id, amount);
+        } else {
+            *vec_map::get_mut(balances, &token_id) = amount;
+        };
     }
 
-    /*
-    * @dev Checks if a token exists in the collection
-    * @param collection Collection object
-    * @param token_id Token type identifier
-    */
+    /* Safe math functions */
+    fun safe_add(a: u64, b: u64): u64 {
+        let c = a + b;
+        assert!(c >= a, EOVERFLOW);
+        c
+    }
+
+    fun safe_sub(a: u64, b: u64): u64 {
+        assert!(a >= b, EOVERFLOW);
+        a - b
+    }
+
+    fun safe_multiply_ratio(amount: u64, numerator: u64, denominator: u64): u64 {
+        assert!(denominator > 0, EZERO_SUPPLY);
+        ((((amount as u128) * (numerator as u128)) / (denominator as u128)) as u64)
+    }
+
+    fun safe_calculate_share(amount: u64, balance: u64, total_supply: u64): (u64, u64) {
+        assert!(total_supply > 0, EZERO_SUPPLY);
+        let share = safe_multiply_ratio(amount, balance, total_supply);
+        let unclaimed = safe_sub(amount, share);
+        (share, unclaimed)
+    }
+
+    /* View functions */
     public fun token_exists(collection: &Collection, token_id: ID): bool {
-        vec_map::contains(
-            &collection.token_supplies,
-            &token_id
-        )
+        vec_map::contains(&collection.token_supplies, &token_id)
     }
 
-    /*
-    * @dev Checks if an address is registered as an operator
-    * @param collection Collection object
-    * @param addr Operator address
-    */
-    public fun is_operator(
-        collection: &Collection,
-        addr: address
-    ): bool {
+    public fun is_operator(collection: &Collection, addr: address): bool {
         vector::contains(&collection.operators, &addr)
     }
 
-    /*
-    * @dev Returns the total supply of a given token
-    * @param collection Collection object
-    * @param token_id Token type identifier
-    */
-    public fun total_supply(collection: &Collection, token_id: ID): u64 {
-        *vec_map::get(
-            &collection.token_supplies,
-            &token_id
-        )
+    public fun get_token_balance(nft: &NFT): u64 {
+        nft.balance
     }
 
-    /*
-    * @dev Returns the metadata for a given token
-    * @param collection Collection object
-    * @param token_id Token type identifier
-    */
-    public fun get_metadata(collection: &Collection, token_id: ID): &TokenMetadata {
-        bag::borrow(
-            &collection.token_metadata,
-            token_id
-        )
+    public fun get_claimed_revenue(nft: &NFT): u64 {
+        nft.claimed_revenue
     }
 
-    /*
-    * @dev Returns the revenue balance for a given token
-    * @param collection Collection object
-    * @param token_id Token type identifier
-    */
+    public fun get_last_epoch_claimed(nft: &NFT): u64 {
+        nft.last_epoch_claimed
+    }
+
+    public fun get_total_supply(collection: &Collection, token_id: ID): u64 {
+        *vec_map::get(&collection.token_supplies, &token_id)
+    }
+
     public fun get_revenue_balance(collection: &Collection, token_id: ID): u64 {
-        balance::value(
-            vec_map::get(&collection.revenues, &token_id)
-        )
+        balance::value(vec_map::get(&collection.revenues, &token_id))
     }
 
-    /*
-    * @dev Initializes collection for testing purposes
-    * @param ctx Transaction context
-    */
+    public fun get_total_revenue(collection: &Collection, token_id: ID): u64 {
+        *vec_map::get(&collection.total_revenue, &token_id)
+    }
+
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
         init(ctx)
     }
-}
+}    
