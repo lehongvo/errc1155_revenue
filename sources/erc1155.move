@@ -431,7 +431,7 @@ module erc1155::erc1155 {
             id: object::new(ctx),
             token_id: nft.token_id,
             balance: amount,
-            claimed_revenue: transfer_claimed_revenue, // Chỉ transfer phần đã claim
+            claimed_revenue: transfer_claimed_revenue,
             epochs_withdrawn: recipient_epochs,
             last_epoch_claimed: nft.last_epoch_claimed,
             created_at: current_time,
