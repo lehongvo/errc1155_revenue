@@ -1,8 +1,8 @@
 {
     "devnet": {
         "linkScan": "https://suiscan.xyz/devnet/home",
-        "transactionHash": "2bHkoWnx5u98YNfHowP8QnVPExkXaWnRxSmXsgY321nx",
-        "contractAddress": "0x840727cf8139f470a8bb3fbfb4d57f7c6ddedae20a02d4e9f093e37700a2bbec",
+        "transactionHash": "DRPdhxJX1NUvr8q9GLDbQXc6aw2f3kBuG1SZRhJGCzFk",
+        "contractAddress": "0x6e6673914f25487340db4ce1559792923af25fc19ecfc437d5fa5cdd253c94be",
         "collectionData": "0xa492f13cba8a9b5ef3f7a07cc5c18b976daaf41617dac6353596cb301b458cdb",
         "details": {
             "CallTime": "2024/11/14-8:1:18",
