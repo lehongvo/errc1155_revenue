@@ -1,426 +1,783 @@
-# ERC-1155 Implementation Documentation
+# ERC-1155 Revenue Share Implementation - Comprehensive Documentation
 
-## Table of Contents
+## I. System Architecture & Core Design
 
-- [Overview](#overview)
-- [Technical Architecture](#technical-architecture)
-- [Core Components](#core-components)
-- [Implementation Details](#implementation-details)
-- [Function Analysis](#function-analysis)
-- [Testing Framework](#testing-framework)
-- [Error Handling](#error-handling)
-- [Events System](#events-system)
-- [Security Considerations](#security-considerations)
-- [Usage Guide](#usage-guide)
+### 1. Introduction
 
-## Overview
+The ERC-1155 Revenue Share is an advanced smart contract implementation on the Sui blockchain that provides:
 
-### Description
+- Multi-token management within a single contract
+- Automated revenue distribution system
+- Role-based access control mechanism
+- Precise balance and revenue tracking
+- Epoch-based revenue distribution system
+- Comprehensive event logging system
 
-A comprehensive ERC-1155 implementation on Sui blockchain that combines:
+### 2. Core Functionality Matrix
 
-- Semi-fungible token capabilities
-- Built-in revenue sharing system
-- Role-based access control
-- Automated balance tracking
+| Feature              | Description                         | Access Level    | Security Level |
+| -------------------- | ----------------------------------- | --------------- | -------------- |
+| Token Management     | Mint, transfer and burn tokens      | Admin/Users     | High           |
+| Revenue Distribution | Deposit and withdraw revenue shares | Operators/Users | Critical       |
+| Access Control       | Role and permission management      | Admin           | Critical       |
+| Balance Tracking     | Multi-level balance monitoring      | System          | High           |
+| Epoch Management     | Revenue epoch control and tracking  | System          | High           |
 
-### Key Features
-
-- Multi-token support in single contract
-- Revenue distribution system
-- Comprehensive event logging
-- Token merging functionality
-- Metadata management
-- Balance tracking at multiple levels
-
-## Technical Architecture
-
-### Core Dependencies
+### 3. Technical Dependencies
 
 ```rust
 use sui::object::{Self, ID, UID};
 use sui::tx_context::{Self, TxContext};
-use std::string::{Self, String};
-use sui::coin::{Self, Coin};
 use sui::transfer;
 use sui::event;
 use sui::balance::{Self, Balance};
-use sui::sui::SUI;
 use sui::bag::{Self, Bag};
 use sui::vec_map::{Self, VecMap};
-use std::vector;
 ```
 
-### Error Codes
+Each dependency serves a specific purpose:
 
-```rust
-const ENO_MINT_AUTHORITY: u64 = 1; // Only mint authority can perform this action
-const ENO_OPERATOR: u64 = 2;       // Only operators can perform this action
-const ETOKEN_NOT_EXIST: u64 = 3;   // Token ID does not exist
-const ENO_BALANCE: u64 = 4;        // Insufficient balance for operation
-const EINVALID_AMOUNT: u64 = 5;    // Invalid amount specified
+- `sui::object`: Core object management and identification
+- `sui::tx_context`: Transaction context and sender information
+- `sui::transfer`: Object transfer capabilities
+- `sui::event`: Event emission system
+- `sui::balance`: Balance management and tracking
+- `sui::bag`: Flexible storage container
+- `sui::vec_map`: Key-value storage optimization
+
+### 4. System Architecture
+
+#### 4.1 Core Components Interaction
+
+```
+[User/Admin/Operator] → [Access Control Layer]
+            ↓
+[Token Management] ←→ [Revenue System]
+            ↓
+[Balance Tracking] → [Event System]
 ```
 
-## Core Components
+#### 4.2 Data Flow Architecture
 
-### 1. Data Structures
+```
+Mint Request → Access Check → Token Creation → Balance Update → Event Emission
+Revenue Deposit → Epoch Creation → Balance Update → Distribution Calculation → Event Emission
+```
 
-#### NFT Structure
+## II. Core Components & Data Structures
+
+### 1. NFT Structure
 
 ```rust
 struct NFT has key, store {
-    id: UID,
-    token_id: ID,
-    balance: u64
+    id: UID,                     // Unique identifier for the NFT
+    token_id: ID,                // Token type identifier
+    balance: u64,                // Current token balance
+    claimed_revenue: u64,        // Total claimed revenue
+    epochs_withdrawn: vector<u64>, // Record of processed epochs
+    last_epoch_claimed: u64,     // Most recent claimed epoch
+    created_at: u64,            // Creation timestamp
+    last_transfer_time: u64     // Last transfer timestamp
 }
 ```
 
-**Detailed Analysis:**
+#### Field Analysis
 
-- `id`: Unique identifier from Sui
-  - Generated using `object::new(ctx)`
-  - Used for object management
-  - Immutable after creation
-- `token_id`: Links to token type
-  - References metadata and supply info
-  - Used for revenue calculations
-  - Immutable after minting
-- `balance`: Token quantity
-  - Mutable through transfers/merges
-  - Used in revenue share calculation
-  - Must be positive
+1. `id: UID`
 
-#### Collection Structure
+   - Purpose: Unique identification in Sui system
+   - Generation: Using `object::new(ctx)`
+   - Immutable after creation
+   - Critical for object management
+
+2. `token_id: ID`
+
+   - Links to token type definition
+   - Used for revenue calculation
+   - References metadata in collection
+   - Immutable post-mint
+
+3. `balance: u64`
+
+   - Current token quantity
+   - Updated during transfers
+   - Used for revenue share calculation
+   - Must remain non-negative
+
+4. `claimed_revenue: u64`
+
+   - Tracks total claimed revenue
+   - Cumulative across all epochs
+   - Used for distribution calculations
+   - Monotonically increasing
+
+5. `epochs_withdrawn`
+   - Vector of processed epoch IDs
+   - Prevents double claims
+   - Historical record
+   - Used in withdrawal validation
+
+### 2. Collection Structure
 
 ```rust
 struct Collection has key {
     id: UID,
-    mint_authority: address,
-    operators: vector<address>,
-    token_supplies: VecMap<ID, u64>,
-    token_metadata: Bag,
-    revenues: VecMap<ID, Balance<SUI>>,
-    holder_balances: VecMap<address, VecMap<ID, u64>>
+    mint_authority: address,          // Administrative address
+    operators: vector<address>,       // Revenue management addresses
+    token_supplies: VecMap<ID, u64>,  // Total supply tracking
+    token_metadata: Bag,              // Token information storage
+    revenues: VecMap<ID, Balance<SUI>>, // Revenue balances per token
+    holder_balances: VecMap<address, VecMap<ID, u64>>, // User balance mapping
+    revenue_epochs: VecMap<ID, vector<RevenueEpoch>>, // Revenue epoch data
+    epoch_counter: VecMap<ID, u64>,   // Epoch tracking per token
+    total_revenue: VecMap<ID, u64>,   // Cumulative revenue per token
+    created_at: u64                   // Collection creation time
 }
 ```
 
-**Component Analysis:**
+#### Component Analysis
 
-1. **Access Control**
+1. Access Control Components
 
-   - `mint_authority`: Primary administrator
-   - `operators`: Revenue managers
-   - Purpose: Multi-level permission system
-
-2. **Token Management**
-
-   - `token_supplies`: Supply tracking
-   - `token_metadata`: Metadata storage
-   - Purpose: Token information management
-
-3. **Revenue System**
-   - `revenues`: Per-token revenue storage
-   - `holder_balances`: User balance tracking
-   - Purpose: Revenue distribution management
-
-#### TokenMetadata Structure
-
-```rust
-struct TokenMetadata has store {
-    name: String,
-    description: String,
-    uri: String
-}
-```
-
-## Implementation Details
-
-### 1. Initialization Process
-
-```rust
-fun init(ctx: &mut TxContext)
-```
-
-**Steps:**
-
-1. Creates new Collection object
-2. Sets transaction sender as mint authority
-3. Initializes empty data structures
-4. Shares object for public access
-
-### 2. Access Control System
-
-#### Roles & Permissions
-
-1. **Mint Authority**
-
-   - Mint new tokens
-   - Add/remove operators
-   - Transfer authority role
-   - Full administrative control
-
-2. **Operators**
-
-   - Deposit revenue
-   - Cannot mint or manage roles
-   - Limited to revenue operations
-
-3. **Token Holders**
-   - Transfer tokens
-   - Withdraw revenue shares
-   - Merge owned tokens
-
-### 3. Revenue Management
-
-#### Revenue Distribution Process
-
-```rust
-public entry fun withdraw_revenue(
-    collection: &mut Collection,
-    nft: &NFT,
-    ctx: &mut TxContext
-)
-```
-
-**Algorithm:**
-
-1. Verify token existence
-2. Calculate holder's share:
    ```rust
-   share = (total_revenue * holder_balance) / total_supply
+   mint_authority: address
+   operators: vector<address>
    ```
-3. Split revenue balance
-4. Transfer to holder
-5. Emit withdrawal event
 
-#### Revenue Deposit Process
+   - `mint_authority`:
 
-```rust
-public entry fun deposit_revenue(
-    collection: &mut Collection,
-    token_id: ID,
-    payment: &mut Coin<SUI>,
-    amount: u64,
-    ctx: &mut TxContext
-)
-```
+     - Primary administrator address
+     - Controls operator management
+     - Immutable after initialization
+     - Has complete system control
 
-**Steps:**
+   - `operators`:
+     - Vector of approved revenue managers
+     - Can deposit revenue
+     - Managed by mint authority
+     - Dynamic list with add/remove capability
 
-1. Verify operator status
-2. Check token existence
-3. Validate payment amount
-4. Transfer to revenue pool
-5. Emit deposit event
+2. Token Management Components
 
-## Testing Framework
+   ```rust
+   token_supplies: VecMap<ID, u64>
+   token_metadata: Bag
+   ```
 
-### Test Environment
+   - `token_supplies`:
 
-```rust
-const ADMIN: address = @0xAA;
-const OPERATOR: address = @0xBB;
-const USER1: address = @0xCC;
-const USER2: address = @0xDD;
-```
+     - Tracks total supply per token
+     - Updated on mint/burn
+     - Critical for revenue calculations
+     - Ensures supply consistency
 
-### Test Categories
+   - `token_metadata`:
+     - Stores token information
+     - Flexible metadata structure
+     - Immutable post-mint
+     - Contains URI and descriptions
 
-#### 1. Initialization Tests
+3. Revenue Management Components
 
-```rust
-#[test]
-fun test_init_revenue()
-```
+   ```rust
+   revenues: VecMap<ID, Balance<SUI>>
+   revenue_epochs: VecMap<ID, vector<RevenueEpoch>>
+   epoch_counter: VecMap<ID, u64>
+   total_revenue: VecMap<ID, u64>
+   ```
 
-**Verifies:**
+   Purpose and functionality of each component:
 
-- Collection creation
-- Initial operator status
-- Basic structure setup
+   - Revenue Balances:
 
-#### 2. Access Control Tests
+     - Tracks active revenue pools
+     - Managed by operators
+     - Used for withdrawals
+     - Balance in SUI tokens
 
-```rust
-#[test]
-#[expected_failure(abort_code = 1)]
-fun test_add_operator_unauthorized()
-```
+   - Revenue Epochs:
 
-**Validates:**
+     - Historical distribution records
+     - Snapshot of supply state
+     - Distribution tracking
+     - Withdrawal validation
 
-- Role permissions
-- Authorization checks
-- Error handling
+   - Epoch Counter:
+     - Unique epoch identification
+     - Monotonically increasing
+     - Per-token tracking
+     - Distribution sequencing
 
-#### 3. Token Operation Tests
+## III. Implementation of Core Functions
 
-```rust
-#[test]
-fun test_mint_erc1155()
-```
+### 1. Administrative Functions
 
-**Checks:**
-
-- Token minting
-- Balance updates
-- Metadata storage
-- Event emission
-
-#### 4. Transfer Tests
+#### 1.1 Initialization
 
 ```rust
-#[test]
-fun test_transfer_erc1155()
-```
-
-**Verifies:**
-
-- Balance updates
-- NFT creation
-- Authorization
-- Error conditions
-
-#### 5. Revenue System Tests
-
-```rust
-#[test]
-fun test_deposit_revenue()
-#[test]
-fun test_withdraw_revenue()
-```
-
-**Validates:**
-
-- Revenue deposits
-- Withdrawal calculations
-- Balance tracking
-- Event emission
-
-### Test Execution Flow
-
-#### Example: Revenue Test
-
-1. Initialize collection
-2. Add operator
-3. Mint tokens
-4. Deposit revenue
-5. Process withdrawal
-6. Verify balances
-
-## Events System
-
-### 1. TokenMinted
-
-```rust
-struct TokenMinted has copy, drop {
-    token_id: ID,
-    creator: address,
-    recipient: address,
-    amount: u64
+fun init(ctx: &mut TxContext) {
+    let collection = Collection {
+        id: object::new(ctx),
+        mint_authority: tx_context::sender(ctx),
+        operators: vector::empty(),
+        token_supplies: vec_map::empty(),
+        token_metadata: bag::new(ctx),
+        revenues: vec_map::empty(),
+        holder_balances: vec_map::empty(),
+        revenue_epochs: vec_map::empty(),
+        epoch_counter: vec_map::empty(),
+        total_revenue: vec_map::empty(),
+        created_at: tx_context::epoch(ctx)
+    };
+    transfer::share_object(collection);
 }
 ```
 
-### 2. RevenueDeposited
+**Technical Analysis:**
+
+- Object Creation:
+
+  - Generates unique UID
+  - Initializes empty data structures
+  - Sets initial state variables
+
+- Access Control:
+
+  - Sets transaction sender as mint authority
+  - Establishes initial permissions
+  - Creates empty operator list
+
+- Object Sharing:
+  - Makes collection globally accessible
+  - Enables public interaction
+  - Maintains single source of truth
+
+#### 1.2 Operator Management
 
 ```rust
-struct RevenueDeposited has copy, drop {
+public entry fun add_operator(
+    collection: &mut Collection,
+    operator: address,
+    ctx: &mut TxContext
+) {
+    assert!(collection.mint_authority == tx_context::sender(ctx), ENO_MINT_AUTHORITY);
+    if (!vector::contains(&collection.operators, &operator)) {
+        vector::push_back(&mut collection.operators, operator);
+    };
+}
+```
+
+**Implementation Details:**
+
+- Security Checks:
+
+  - Validates mint authority
+  - Prevents duplicate operators
+  - Ensures proper authorization
+
+- State Updates:
+  - Modifies operator list
+  - Maintains unique entries
+  - Updates access permissions
+
+### 2. Token Management System
+
+#### 2.1 Token Minting
+
+```rust
+public entry fun mint(
+    collection: &mut Collection,
+    name: vector<u8>,
+    description: vector<u8>,
+    uri: vector<u8>,
+    amount: u64,
+    recipient: address,
+    ctx: &mut TxContext
+) {
+    // Authority validation
+    assert!(collection.mint_authority == tx_context::sender(ctx), ENO_MINT_AUTHORITY);
+    assert!(amount > 0, EINVALID_AMOUNT);
+
+    // Token creation
+    let token_id = object::new(ctx);
+    let current_time = tx_context::epoch(ctx);
+
+    // Metadata setup
+    let metadata = TokenMetadata {
+        name: string::utf8(name),
+        description: string::utf8(description),
+        uri: string::utf8(uri),
+        created_at: current_time,
+        properties: option::none()
+    };
+
+    // Initialize tracking
+    bag::add(&mut collection.token_metadata, object::uid_to_inner(&token_id), metadata);
+    vec_map::insert(&mut collection.token_supplies, object::uid_to_inner(&token_id), amount);
+    vec_map::insert(&mut collection.revenues, object::uid_to_inner(&token_id), balance::zero());
+    vec_map::insert(&mut collection.revenue_epochs, object::uid_to_inner(&token_id), vector::empty());
+    vec_map::insert(&mut collection.epoch_counter, object::uid_to_inner(&token_id), 0);
+    vec_map::insert(&mut collection.total_revenue, object::uid_to_inner(&token_id), 0);
+
+    // Create NFT
+    let nft = NFT {
+        id: object::new(ctx),
+        token_id: object::uid_to_inner(&token_id),
+        balance: amount,
+        claimed_revenue: 0,
+        epochs_withdrawn: vector::empty(),
+        last_epoch_claimed: 0,
+        created_at: current_time,
+        last_transfer_time: current_time
+    };
+
+    // Update balances and emit event
+    update_holder_balance(collection, recipient, object::uid_to_inner(&token_id), amount);
+
+    event::emit(TokenMinted {
+        token_id: object::uid_to_inner(&token_id),
+        creator: tx_context::sender(ctx),
+        recipient,
+        amount,
+        metadata: TokenMetadataEvent {
+            name: string::utf8(name),
+            description: string::utf8(description),
+            uri: string::utf8(uri)
+        },
+        timestamp: current_time
+    });
+
+    transfer::public_transfer(nft, recipient);
+    object::delete(token_id);
+}
+```
+
+**Technical Breakdown:**
+
+1. Input Validation
+
+   - Authority check
+   - Amount validation
+   - Parameter verification
+
+2. Token Creation
+
+   - Generate unique ID
+   - Create metadata structure
+   - Initialize tracking maps
+
+3. NFT Generation
+
+   - Create NFT object
+   - Set initial properties
+   - Configure revenue tracking
+
+4. State Updates
+
+   - Update supply tracking
+   - Initialize revenue maps
+   - Update holder balances
+
+5. Event Emission
+   - Create event record
+   - Include all relevant data
+   - Maintain audit trail
+
+### 3. Revenue Distribution System
+
+### 3.1 Revenue Deposit System
+
+#### Overview
+
+The revenue deposit system enables operators to distribute revenue to token holders through an epoch-based mechanism, ensuring fair and transparent distribution of revenue.
+
+#### How It Works
+
+- Each token type maintains its own revenue pool
+- Revenue is distributed through epochs
+- Token holders can claim their share based on holdings
+- Distribution is proportional to token ownership
+
+#### Key Features
+
+- Epoch-based tracking
+- Automated share calculation
+- Real-time balance updates
+- Event emission for transparency
+
+#### Prerequisites
+
+- Must be registered operator
+- Valid token ID
+- Sufficient SUI payment
+- Active token supply
+
+#### Revenue Deposit Flow
+
+```mermaid
+graph TD
+    A[Operator Deposits Revenue] --> B[Validate Operator]
+    B --> C[Check Token Exists]
+    C --> D[Create New Epoch]
+    D --> E[Update Revenue Pool]
+    E --> F[Emit Event]
+```
+
+#### Required Permissions
+
+| Role     | Permission           |
+| -------- | -------------------- |
+| Admin    | Add/Remove Operators |
+| Operator | Deposit Revenue      |
+| User     | Claim Revenue        |
+
+#### Usage Example
+
+```rust
+// Deposit revenue to token pool
+deposit_revenue(
+    collection,
+    token_id,
+    payment,
+    1000 // amount
+)
+```
+
+#### Technical Details
+
+**1. Initialization**
+
+- Validates operator status
+- Checks token existence
+- Verifies payment amount
+
+**2. Epoch Creation**
+
+- Generates unique epoch ID
+- Records total supply snapshot
+- Creates withdrawal tracking
+
+**3. Revenue Processing**
+
+- Updates token revenue pool
+- Records in epoch history
+- Updates cumulative totals
+
+**4. Event Generation**
+
+- Records deposit details
+- Captures supply snapshots
+- Maintains audit trail
+
+#### Error Handling
+
+| Error Code       | Description             | Solution                             |
+| ---------------- | ----------------------- | ------------------------------------ |
+| ENO_OPERATOR     | Not authorized operator | Ensure caller is registered operator |
+| ETOKEN_NOT_EXIST | Token doesn't exist     | Verify token ID                      |
+| EINVALID_AMOUNT  | Invalid payment amount  | Check payment amount > 0             |
+| EZERO_SUPPLY     | No token supply         | Ensure tokens are in circulation     |
+
+#### Important Considerations
+
+**Security**
+
+- Operator validation
+- Payment verification
+- Balance consistency
+- Atomic operations
+
+**Performance**
+
+- Efficient storage usage
+- Optimized calculations
+- Minimized state changes
+
+**Maintenance**
+
+- Regular balance checks
+- Event monitoring
+- State verification
+
+#### Best Practices
+
+**For Operators**
+
+- Verify token status before deposit
+- Monitor transaction success
+- Track deposit history
+- Maintain sufficient SUI balance
+
+**For Developers**
+
+- Test with various amounts
+- Handle all error cases
+- Monitor gas costs
+- Maintain event logs
+
+#### Revenue Deposit Validation
+
+```plaintext
+1. Operator Check
+   - Verify operator status
+   - Check operator permissions
+
+2. Token Validation
+   - Confirm token exists
+   - Check active supply
+
+3. Payment Validation
+   - Verify amount > 0
+   - Check sufficient payment
+```
+
+#### Example Event Data
+
+```rust
+RevenueDeposited {
     token_id: ID,
     operator: address,
-    amount: u64
+    amount: u64,
+    epoch_id: u64,
+    timestamp: u64
 }
 ```
 
-### 3. RevenueWithdrawn
+#### Gas Considerations
+
+- State updates
+- Event emission
+- Balance calculations
+- Storage modifications
+
+#### Monitoring & Maintenance
+
+- Track successful deposits
+- Monitor failed transactions
+- Verify epoch creation
+- Check balance consistency
+
+#### Tips
+
+1. Always verify operator status before deposit
+2. Monitor gas costs for large deposits
+3. Keep track of epoch numbers
+4. Verify event emission
+5. Maintain accurate records
+
+#### Related Functions
+
+- `withdraw_revenue()`
+- `check_operator_status()`
+- `get_current_epoch()`
+- `calculate_shares()`
+
+#### Next Steps
+
+After successful deposit:
+
+1. Monitor event emission
+2. Verify balance updates
+3. Check epoch creation
+4. Inform token holders
+
+Need more specific details about any aspect of the revenue deposit system?
+
+### 3.2 Revenue Withdrawal System
+
+#### Overview
+
+The withdrawal system enables token holders to claim their proportional share of revenue across multiple epochs, ensuring fair and accurate distribution.
+
+#### How It Works
+
+- Token holders can claim revenue from multiple epochs
+- Shares calculated based on token balance at epoch creation
+- Automatic tracking of claimed epochs
+- Prevention of double claims
+
+#### Key Features
+
+- Multi-epoch processing
+- Proportional distribution
+- Automatic share calculation
+- Claim history tracking
+
+#### Prerequisites
+
+- Must hold NFT tokens
+- Unclaimed epochs available
+- Positive token balance
+- Valid token ID
+
+#### Withdrawal Flow
+
+```mermaid
+graph TD
+    A[User Initiates Withdrawal] --> B[Verify Token Balance]
+    B --> C[Check Unclaimed Epochs]
+    C --> D[Calculate Shares]
+    D --> E[Process Withdrawal]
+    E --> F[Update Records]
+    F --> G[Transfer SUI]
+```
+
+#### Required State
+
+| Check   | Description                      |
+| ------- | -------------------------------- |
+| Balance | Must have positive token balance |
+| Epochs  | Must have unclaimed epochs       |
+| Revenue | Must have available revenue      |
+| History | Track withdrawal history         |
+
+#### Usage Example
 
 ```rust
-struct RevenueWithdrawn has copy, drop {
+// Withdraw available revenue
+withdraw_revenue(
+    collection,
+    nft,
+    ctx
+)
+```
+
+#### Share Calculation
+
+```plaintext
+For each epoch:
+user_share = (epoch_revenue * user_balance) / total_supply
+total_withdrawal = sum(user_share for all unclaimed epochs)
+```
+
+#### Error Handling
+
+| Error            | Description          | Solution              |
+| ---------------- | -------------------- | --------------------- |
+| ENO_BALANCE      | Zero token balance   | Must hold tokens      |
+| ENO_NEW_REVENUE  | No unclaimed revenue | Wait for new deposits |
+| ETOKEN_NOT_EXIST | Invalid token        | Verify token ID       |
+| EINVALID_AMOUNT  | Invalid calculation  | Check math operations |
+
+#### Important Considerations
+
+**Security**
+
+- Double claim prevention
+- Balance verification
+- Atomic transactions
+- State consistency
+
+**Performance**
+
+- Efficient epoch processing
+- Optimized calculations
+- Minimized state updates
+
+**User Experience**
+
+- Clear success/failure
+- Detailed event data
+- Transaction status
+- Balance updates
+
+#### Best Practices
+
+**For Users**
+
+- Check available revenue
+- Monitor gas costs
+- Verify received amount
+- Keep withdrawal records
+
+**For Developers**
+
+- Handle all error cases
+- Maintain claim history
+- Monitor gas usage
+- Track failed claims
+
+#### Events
+
+```rust
+RevenueWithdrawn {
     token_id: ID,
     holder: address,
-    amount: u64
+    amount: u64,
+    epochs: vector<u64>,
+    timestamp: u64
 }
 ```
 
-## Security Considerations
+#### Process Steps
 
-### 1. Access Control
+**1. Validation**
 
-- Role-based permissions
-- Authority validation
-- Operation restrictions
+- Check token balance
+- Verify unclaimed epochs
+- Validate token status
 
-### 2. Input Validation
+**2. Calculation**
 
-- Balance checks
-- Amount validation
-- Token existence verification
+- Process each epoch
+- Calculate shares
+- Sum total claim
 
-### 3. State Management
+**3. Processing**
 
-- Atomic operations
-- Balance consistency
-- Event tracking
+- Update claim history
+- Process transfer
+- Update state
 
-### 4. Error Handling
+**4. Finalization**
 
-- Custom error codes
-- Comprehensive checks
-- Clear error messages
+- Emit events
+- Update records
+- Transfer SUI
 
-## Usage Guide
+#### Tips
 
-### 1. Contract Deployment
+1. Check available revenue before withdrawal
+2. Monitor transaction status
+3. Keep withdrawal records
+4. Verify received amounts
+5. Track claimed epochs
 
-```rust
-// Initialize collection
-init(ctx);
-```
+#### Common Issues and Solutions
 
-### 2. Token Management
+| Issue              | Solution              |
+| ------------------ | --------------------- |
+| Failed Transaction | Check gas and balance |
+| Incorrect Amount   | Verify calculations   |
+| Missing Epochs     | Check claim history   |
+| Stuck Transaction  | Monitor status        |
 
-```rust
-// Mint tokens
-mint(collection, "Name", "Description", "URI", 1000, recipient, ctx);
+#### Related Functions
 
-// Transfer tokens
-transfer(nft, 500, new_recipient, ctx);
-```
+- `get_claimable_amount()`
+- `check_claimed_epochs()`
+- `calculate_total_share()`
+- `verify_withdrawal_status()`
 
-### 3. Revenue Operations
+#### Monitoring
 
-```rust
-// Deposit revenue
-deposit_revenue(collection, token_id, payment, amount, ctx);
+- Track successful withdrawals
+- Monitor failed attempts
+- Verify balance changes
+- Check event emission
 
-// Withdraw revenue
-withdraw_revenue(collection, nft, ctx);
-```
+#### Performance Optimization
 
-### 4. Access Control
+- Batch epoch processing
+- Efficient calculations
+- Optimized storage
+- Minimized state changes
 
-```rust
-// Add operator
-add_operator(collection, operator_address, ctx);
+#### Next Steps After Withdrawal
 
-// Remove operator
-remove_operator(collection, operator_address, ctx);
-```
+1. Verify received amount
+2. Check updated balance
+3. Monitor transaction status
+4. Keep withdrawal records
 
-## Future Improvements
-
-1. **Enhanced Features**
-
-   - Batch operations
-   - Metadata updates
-   - Advanced revenue models
-
-2. **Optimizations**
-
-   - Gas efficiency
-   - Storage optimization
-   - Batch processing
-
-3. **Additional Functionality**
-   - Token burning
-   - Approval system
-   - Secondary market support
+Need specific details about any aspect of the withdrawal system?
